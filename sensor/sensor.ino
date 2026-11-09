@@ -3,14 +3,10 @@
 #include <esp_wifi.h>
 
 // =====================================================
-// PIR 센서 핀
-// =====================================================
-const uint8_t PIR_PIN = 14;
-
-// =====================================================
-// 조도 센서 핀 (아날로그)
+// 센서 핀
 // =====================================================
 const uint8_t LDR_PIN = 34;
+const uint8_t PIR_PIN = 15;
 
 // =====================================================
 // 코어 모듈 MAC 주소
@@ -19,6 +15,7 @@ const uint8_t CORE_MAC[6] = {
     0xD4, 0xE9, 0xF4, 0xE3, 0x67, 0xE8
 };
 
+// 코어 모듈이 연결된 Wi-Fi 채널과 같아야 함
 const uint8_t ESPNOW_CHANNEL = 1;
 
 // 전송 주기: 30초
@@ -28,33 +25,20 @@ unsigned long lastSendTime = 0;
 
 // =====================================================
 // 전송 패킷
-// nodeId: 0x01 = PIR/조도 슬레이브 (이 노드)
-//         0x02 = TF-Luna 슬레이브
-// motion: 0 = 감지 없음, 1 = 움직임 감지
+// 코어 모듈에서도 완전히 동일해야 함
 // =====================================================
 typedef struct __attribute__((packed)) {
-    uint8_t  nodeId;      // 0x01 고정
-    uint16_t lightRaw;    // 조도 ADC 원시값 (0~4095)
-    uint8_t  motion;      // PIR 상태 (0 or 1)
+    uint16_t lightRaw;
+    uint8_t motion;
 } SensorPacket;
 
 // =====================================================
-// ESP-NOW 전송 완료 콜백 플래그
-// =====================================================
-static volatile bool s_sendDone    = false;
-static volatile bool s_sendSuccess = false;
-
-void IRAM_ATTR onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
-    s_sendSuccess = (status == ESP_NOW_SEND_SUCCESS);
-    s_sendDone    = true;
-}
-
-// =====================================================
-// ESP-NOW 초기화 + 전송 콜백 등록
+// ESP-NOW 초기화
 // =====================================================
 bool initializeEspNow() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
+
     delay(100);
 
     if (esp_wifi_set_channel(
@@ -70,13 +54,17 @@ bool initializeEspNow() {
         return false;
     }
 
-    esp_now_register_send_cb(onDataSent);
-
     esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, CORE_MAC, sizeof(CORE_MAC));
+
+    memcpy(
+        peerInfo.peer_addr,
+        CORE_MAC,
+        sizeof(CORE_MAC)
+    );
+
     peerInfo.channel = ESPNOW_CHANNEL;
     peerInfo.encrypt = false;
-    peerInfo.ifidx   = WIFI_IF_STA;
+    peerInfo.ifidx = WIFI_IF_STA;
 
     if (esp_now_is_peer_exist(CORE_MAC)) {
         esp_now_del_peer(CORE_MAC);
@@ -95,11 +83,9 @@ bool initializeEspNow() {
 // =====================================================
 void sendSensorData() {
     SensorPacket packet = {};
-    packet.nodeId   = 0x01;
-    packet.lightRaw = static_cast<uint16_t>(analogRead(LDR_PIN));
-    packet.motion   = digitalRead(PIR_PIN) ? 1 : 0;
 
-    s_sendDone = s_sendSuccess = false;
+    packet.lightRaw = analogRead(LDR_PIN);
+    packet.motion = digitalRead(PIR_PIN) == HIGH ? 1 : 0;
 
     esp_err_t result = esp_now_send(
         CORE_MAC,
@@ -115,15 +101,8 @@ void sendSensorData() {
         return;
     }
 
-    // 콜백 대기 (최대 2초)
-    const unsigned long cbDeadline = millis() + 2000;
-    while (!s_sendDone && millis() < cbDeadline) {
-        delay(10);
-    }
-
     Serial.printf(
-        "전송 %s | 조도: %u | 움직임: %s\n",
-        s_sendSuccess ? "성공" : "실패(ACK없음)",
+        "전송 완료 요청 | 조도 RAW: %u | PIR: %s\n",
         packet.lightRaw,
         packet.motion ? "감지" : "없음"
     );
@@ -136,20 +115,33 @@ void setup() {
     Serial.begin(115200);
     delay(500);
 
+    analogReadResolution(12);
+
+    pinMode(LDR_PIN, INPUT);
     pinMode(PIR_PIN, INPUT);
-    analogReadResolution(12);  // 12비트 ADC (0~4095)
 
     Serial.println();
-    Serial.println("PIR+조도 슬레이브 노드 시작");
+    Serial.println("조도/PIR 센서 모듈 시작");
 
     if (!initializeEspNow()) {
-        Serial.println("ESP-NOW 설정 실패 — 재부팅 필요");
+        Serial.println("ESP-NOW 설정 실패");
         return;
     }
 
-    Serial.print("슬레이브 MAC: ");
+    Serial.print("센서 모듈 MAC: ");
     Serial.println(WiFi.macAddress());
-    Serial.printf("ESP-NOW 채널: %u\n", ESPNOW_CHANNEL);
+
+    Serial.printf(
+        "ESP-NOW 채널: %u\n",
+        ESPNOW_CHANNEL
+    );
+
+    // PIR 워밍업
+    Serial.println("PIR 워밍업 중...");
+
+    delay(30000);
+
+    Serial.println("PIR 준비 완료");
 
     // 시작 직후 한 번 전송
     sendSensorData();
